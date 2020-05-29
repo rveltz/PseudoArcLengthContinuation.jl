@@ -74,7 +74,7 @@ function corrector(it, z_old::M, tau::M, z_pred::M,
 			algo::Talgo, linearalgo = MatrixFreeLBS();
 			normC = norm,
 			callback = (x, f, J, res, iteration, itlinear, options; kwargs...) -> true, kwargs...) where {T, vectype, M <: BorderedArray{vectype, T}, Talgo <: AbstractTangentPredictor}
-	return newtonPALC(it, z_old, tau, z_pred, ds, θ; linearbdalgo = linearalgo, normN = normC, callback = callback, kwargs...)
+	return newtonPALC(it, z_old, tau, z_pred, ds, θ, linearalgo, normC, callback; kwargs...)
 end
 
 # corrector based on natural formulation
@@ -95,7 +95,7 @@ end
 function getTangent!(tau::M, z_new::M, z_old::M, it::PALCIterable, ds, θ, algo::Talgo, verbosity) where {T, vectype, M <: BorderedArray{vectype, T}, Talgo <: AbstractSecantPredictor}
 	(verbosity > 0) && println("--> predictor = ", algo)
 	# secant predictor: tau = z_new - z_old; tau *= sign(ds) / normtheta(tau)
-	copyto!(tau, z_new)
+	it.contParams.inPlace ? copyto!(tau, z_new) : tau = copy(z_new)
 	minus!(tau, z_old)
 	if algo isa SecantPred
 		α = sign(ds) / it.dottheta(tau, θ)
@@ -204,7 +204,7 @@ function newtonPALC(F, Jh, par, paramlens::Lens,
 					callback = (x, f, J, res, iteration, itlinear, optionsN; kwargs...) ->  true, kwargs...) where {T, vectype}
 	# Extract parameters
 	newtonOpts = contparams.newtonOptions
-	@unpack tol, maxIter, verbose, alpha, almin, linesearch = newtonOpts
+	@unpack tol, maxIter, verbose, alpha, almin, linesearch, saveIterations = newtonOpts
 	@unpack finDiffEps = contparams
 
 	N = (x, p) -> arcLengthEq(dottheta, minus(x, z0.u), p - z0.p, τ0.u, τ0.p, θ, ds)
@@ -221,10 +221,7 @@ function newtonPALC(F, Jh, par, paramlens::Lens,
 	dX = _copy(res_f) # copy(res_f)
 	dp = T(0)
 	up = T(0)
-	# dFdp = (F(x, p + finDiffEps) - res_f) / finDiffEps
-	dFdp = copyto!(similar(res_f), F(x, set(par, paramlens,p + finDiffEps))) # copy(F(x, p + finDiffEps))
-	minus!(dFdp, res_f)	# dFdp = dFdp - res_f
-	rmul!(dFdp, T(1) / finDiffEps)
+	dFdp = rmul!( minus!( F(x,set(par,paramlens,p+finDiffEps)), res_f ), 1/finDiffEps)
 
 	res     = normAC(res_f, res_n)
 	resHist = [res]
@@ -235,18 +232,16 @@ function newtonPALC(F, Jh, par, paramlens::Lens,
 	step_ok = true
 
 	# invoke callback before algo really starts
-	compute = callback(x, res_f, nothing, res, 0, 0, contparams; z0 = z_pred, p = p, kwargs...)
+	compute = callback(x, res_f, nothing, res, 0, 0, contparams; kwargs...)
 
 	# Main loop
 	while (res > tol) & (it < maxIter) & step_ok & compute
-		# copyto!(dFdp, (F(x, p + epsi) - F(x, p)) / epsi)
-		copyto!(dFdp, F(x, set(par, paramlens, p + finDiffEps)))
-			minus!(dFdp, res_f); rmul!(dFdp, T(1) / finDiffEps)
+		dFdp = rmul!( minus!( F(x,set(par,paramlens,p+finDiffEps)), res_f ), 1/finDiffEps)
 
 		J = Jh(x, set(par, paramlens, p))
 		u, up, flag, liniter = linearbdalgo(J, dFdp, τ0, res_f, res_n, θ)
 
-		if linesearch
+		if linesearch & saveIterations
 			step_ok = false
 			while !step_ok & (alpha > almin)
 				# x_pred = x - alpha * u
@@ -271,7 +266,7 @@ function newtonPALC(F, Jh, par, paramlens::Lens,
 				end
 			end
 		else
-			minus!(x, u) 	# x .= x .- u
+			x = minus!(x, u) 	# x .= x .- u
 			p = p - up
 
 			copyto!(res_f, F(x, set(par, paramlens, p)))
@@ -280,19 +275,19 @@ function newtonPALC(F, Jh, par, paramlens::Lens,
 			res = normAC(res_f, res_n)
 		end
 
-		push!(resHist, res)
+		saveIterations && push!(resHist, res)
 		it += 1
 
 		verbose && displayIteration(it, 1, res, liniter)
-		if callback(x, res_f, J, res, it, liniter, contparams; z0 = z_pred, p = p, kwargs...) == false
+		if callback(x, res_f, J, res, it, liniter, contparams; kwargs...) == false
 			break
 		end
 
 	end
-	flag = (resHist[end] < tol) & callback(x, res_f, nothing, res, it, nothing, contparams; z0 = z_pred, p = p, kwargs...)
+	flag = (res < tol) & callback(x, res_f, nothing, res, it, nothing, contparams; kwargs...)
 	return BorderedArray(x, p), resHist, flag, it
 end
 
 # conveniency for use in continuation
-newtonPALC(it::PALCIterable, z0::M, τ0::M, z_pred::M, ds::T, θ::T; kwargs...) where {T, vectype, M <: BorderedArray{vectype, T}} = newtonPALC(it.F, it.J, it.par, it.param_lens, z0, τ0, z_pred, ds, θ, it.contParams, it.dottheta; kwargs...)
+newtonPALC(it::PALCIterable, z0::M, τ0::M, z_pred::M, ds::T, θ::T, linearbdalgo, norm, callback; kwargs...) where {T, vectype, M <: BorderedArray{vectype, T}} = newtonPALC(it.F, it.J, it.par, it.param_lens, z0, τ0, z_pred, ds, θ, it.contParams, it.dottheta; linearbdalgo=linearbdalgo, normN=norm, callback=callback, kwargs...)
 ####################################################################################################

@@ -19,14 +19,15 @@ Returns a variable containing parameters to affect the `newton` algorithm when s
     For performance reasons, we decided to use an immutable structure to hold the parameters. One can use the package `Setfield.jl` to drastically simplify the mutation of different fields. See the tutorials for examples.
 """
 @with_kw struct NewtonPar{T, L <: AbstractLinearSolver, E <: AbstractEigenSolver}
-	tol::T			 = 1e-10
-	maxIter::Int64 	 = 50
-	alpha::T         = convert(typeof(tol), 1.0)        # damping
-	almin::T         = convert(typeof(tol), 0.001)      # minimal damping
-	verbose::Bool    = false
-	linesearch::Bool = false
-	linsolver::L 	 = DefaultLS()
-	eigsolver::E 	 = DefaultEig()
+	tol::T			 	 = 1e-10
+	maxIter::Int64 	 	 = 50
+	alpha::T         	 = convert(typeof(tol), 1.0)        # damping
+	almin::T         	 = convert(typeof(tol), 0.001)      # minimal damping
+	verbose::Bool    	 = false
+	linesearch::Bool 	 = false
+	saveIterations::Bool = false
+	linsolver::L 	 	 = DefaultLS()
+	eigsolver::E 	 	 = DefaultEig()
 end
 
 ####################################################################################################
@@ -89,7 +90,7 @@ julia> sol, hist, flag, _ = newton(F, Jac, x0, nothing, opts, normN = x->norm(x,
 """
 function newton(Fhandle, Jhandle, x0, p0, options::NewtonPar; normN = norm, callback = (x, f, J, res, iteration, itlinear, optionsN; kwargs...) -> true, kwargs...)
 	# Extract parameters
-	@unpack tol, maxIter, verbose, linesearch = options
+	@unpack tol, maxIter, verbose, linesearch, saveIterations = options
 
 	# Initialize iterations
 	x = similar(x0); copyto!(x, x0) # x = copy(x0)
@@ -105,7 +106,7 @@ function newton(Fhandle, Jhandle, x0, p0, options::NewtonPar; normN = norm, call
 	verbose && displayIteration(it, neval, res)
 
 	# invoke callback before algo really starts
-	compute = callback(x, f, nothing, res, it, 0, options; x0 = x0, kwargs...)
+	compute = callback(x, f, nothing, res, it, 0, options; kwargs...)
 
 	# Main loop
 	while (res > tol) & (it < maxIter) & compute
@@ -113,23 +114,23 @@ function newton(Fhandle, Jhandle, x0, p0, options::NewtonPar; normN = norm, call
 		d, _, itlinear = options.linsolver(J, f)
 
 		# Update solution: x .= x .- d
-		minus!(x, d)
+		x = minus!(x, d)
 
 		copyto!(f, Fhandle(x, p0))
 		res = normN(f)
 
 		neval += 1
-		push!(resHist, res)
+		saveIterations && push!(resHist, res)
 		it += 1
 
 		verbose && displayIteration(it, neval, res, itlinear)
 
-		if callback(x, f, J, res, it, itlinear, options; x0 = x0, kwargs...) == false
+		if callback(x, f, J, res, it, itlinear, options; kwargs...) == false
 			break
 		end
 	end
-	((resHist[end] > tol) && verbose) && @error("\n--> Newton algorithm failed to converge, residual = $(res[end])")
-	flag = (resHist[end] < tol) & callback(x, f, nothing, res, it, nothing, options; x0 = x0, kwargs...)
+	((res > tol) & verbose) && printstyled(color=:red, "\n--> Newton algorithm failed to converge, residual = $(res)")
+	flag = (res < tol) & callback(x, f, nothing, res, it, nothing, options; kwargs...)
 	return x, resHist, flag, it
 end
 

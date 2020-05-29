@@ -71,6 +71,7 @@ Handling `ds` adaptation (see [`continuation`](@ref) for more information)
 	finDiffEps::T  = 1e-9 				#constant for finite differences
 	newtonOptions::NewtonPar{T, S, E} = NewtonPar()
 
+	inPlace::Bool = true                # whether to use inplace operations
 	saveToFile::Bool = false 			# save to file?
 	saveSolEveryNsteps::Int64 = 0		# what steps do we save the current solution
 
@@ -429,14 +430,14 @@ function iterate(it::PALCIterable; _verbosity = it.verbosity)
 	# Converge initial guess
 	(verbosity > 0) && printstyled("*********** CONVERGE INITIAL GUESS *************", bold = true, color = :magenta)
 	# we pass additional kwargs to newton so that it is sent to the newton callback
-	u0, fval, isconverged, itnewton = newton(it.F, it.J, it.x0, it.par, newtonOptions; normN = it.normC, callback = it.callbackN, iterationC = 0, p = p0)
+	u0, fval, isconverged, itnewton = newton(it.F, it.J, it.x0, it.par, newtonOptions; normN = it.normC, callback = it.callbackN, iterationC = 0)
 	@assert isconverged "Newton failed to converge initial guess"
 	(verbosity > 0) && println("\n--> convergence of initial guess = OK")
 	(verbosity > 0) && println("--> parameter = $(p0), initial step")
 	(verbosity > 0) && printstyled("\n******* COMPUTING INITIAL TANGENT *************", bold = true, color = :magenta)
 	η = T(150)
 	u_pred, fval, isconverged, itnewton = newton(it.F, it.J,
-			u0, set(it.par, it.param_lens, p0 + ds / η), newtonOptions; normN = it.normC, callback = it.callbackN, iterationC = 0, p = p0 + ds / η)
+			u0, set(it.par, it.param_lens, p0 + ds / η), newtonOptions; normN = it.normC, callback = it.callbackN, iterationC = 0)
 	@assert isconverged "Newton failed to converge for the computation of the initial tangent"
 	(verbosity > 0) && (print("\n--> convergence of initial guess = ");printstyled("OK\n\n", color=:green))
 	(verbosity > 0) && println("--> parameter = $(p0 + ds/η), initial step (bis)")
@@ -445,7 +446,7 @@ function iterate(it::PALCIterable; _verbosity = it.verbosity)
 	tau  = copy(z_pred)
 
 	# compute the tangents
-	getTangent!(tau, z_pred, z_old, it, ds, theta, SecantPred(), _verbosity)
+	tau = getTangent!(tau, z_pred, z_old, it, ds, theta, SecantPred(), _verbosity)
 
 	# compute eigenvalues to get the type
 	if it.contParams.computeEigenValues
@@ -470,9 +471,10 @@ function iterate(it::PALCIterable, state::PALCStateVariables; _verbosity = it.ve
 	verbosity = min(it.verbosity, _verbosity)
 
 	@unpack step, ds, theta = state
+	@unpack inPlace = it.contParams
 
 	# Predictor: z_pred, following method only mutates z_pred
-	getPredictor!(state.z_pred, state.z_old, state.tau, ds, it.tangentAlgo)
+	state.z_pred = getPredictor!(state.z_pred, state.z_old, state.tau, ds, it.tangentAlgo)
 	(verbosity > 0) && println("#"^35)
 	(verbosity > 0) && @printf("Start of Continuation Step %d:\nParameter = %2.4e ⟶  %2.4e [guess]\n", step, state.z_old.p, state.z_pred.p)
 	(verbosity > 0) && @printf("Step size = %2.4e\n", ds)
@@ -482,18 +484,18 @@ function iterate(it::PALCIterable, state::PALCStateVariables; _verbosity = it.ve
 			state.z_old, state.tau, state.z_pred,
 			ds, theta,
 			it.tangentAlgo, it.linearAlgo,
-			normC = it.normC, callback = it.callbackN, iterationC = step, p = state.z_old.p)
+			normC = it.normC, callback = it.callbackN, iterationC = step)
 
 	# Successful step
 	if state.isconverged
 		(verbosity > 0) && printstyled("--> Step Converged in $(state.itnewton) Nonlinear Iterations\n", color=:green)
 
 		# Get predictor, it only mutates tau
-		getTangent!(state.tau, z_newton, state.z_old, it,
+		state.tau = getTangent!(state.tau, z_newton, state.z_old, it,
 					ds, theta, it.tangentAlgo, verbosity)
 
 		# update current solution
-		copyto!(state.z_old, z_newton)
+		inPlace ? copyto!(state.z_old, z_newton) : state.z_old = copy(z_newton)
 	else
 		(verbosity > 0) && printstyled("Newton correction failed\n", color=:red)
 		(verbosity > 0) && println("--> Newton Residuals history = ", fval)
